@@ -29,7 +29,11 @@ import textwrap
 import time
 from typing import Any, Dict, List, Optional
 
+from dotenv import load_dotenv
 from openai import OpenAI
+
+# Load variables from .env file (values already in the environment take precedence)
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 
 # ---------------------------------------------------------------------------
 # Configuration

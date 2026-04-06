@@ -12,7 +12,10 @@ import argparse
 import os
 import sys
 
+from dotenv import load_dotenv
 from huggingface_hub import HfApi, create_repo
+
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 
 
 IGNORE_PATTERNS = [
