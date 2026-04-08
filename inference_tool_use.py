@@ -56,27 +56,13 @@ MAX_TOKENS = 1000
 SUCCESS_SCORE_THRESHOLD = 0.5
 
 TASKS = ["classify_and_route", "investigate_and_resolve", "complex_operations"]
-DEFAULT_SEEDS = [7, 42, 99]
-
-
-def _parse_eval_seeds() -> List[int]:
-    raw = os.getenv("EVAL_SEEDS", "")
-    if not raw.strip():
-        return DEFAULT_SEEDS
-    seeds: List[int] = []
-    for part in raw.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        seeds.append(int(part))
-    return seeds or DEFAULT_SEEDS
 
 # ---------------------------------------------------------------------------
 # Logging helpers (mandatory format)
 # ---------------------------------------------------------------------------
 
-def log_start(task: str, env: str, model: str, seed: int) -> None:
-    print(f"[START] task={task} seed={seed} env={env} model={model}", flush=True)
+def log_start(task: str, env: str, model: str) -> None:
+    print(f"[START] task={task} env={env} model={model}", flush=True)
 
 
 def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
@@ -185,7 +171,7 @@ def build_observation_prompt(obs: Dict[str, Any], history: List[Dict[str, str]])
 # Smart tool-use episode runner
 # ---------------------------------------------------------------------------
 
-async def run_task(task: str, base_url: str, seed: int) -> None:
+async def run_task(task: str, base_url: str) -> None:
     from openenv.core.generic_client import GenericEnvClient
 
     rewards: List[float] = []
@@ -194,7 +180,7 @@ async def run_task(task: str, base_url: str, seed: int) -> None:
     success = False
     error_msg: Optional[str] = None
 
-    log_start(task=task, env=BENCHMARK, model=MODEL_NAME, seed=seed)
+    log_start(task=task, env=BENCHMARK, model=MODEL_NAME)
 
     client_openai = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
     # Running conversation history for the LLM
@@ -202,7 +188,7 @@ async def run_task(task: str, base_url: str, seed: int) -> None:
 
     async with GenericEnvClient(base_url=base_url) as env:
         try:
-            step_result = await env.reset(task=task, seed=seed)
+            step_result = await env.reset(task=task)
             obs: Dict[str, Any] = step_result.observation  # type: ignore[assignment]
             done = step_result.done
 
@@ -348,10 +334,8 @@ async def main() -> None:
         print("[DEBUG] Server ready.", flush=True)
 
     try:
-        seeds = _parse_eval_seeds()
-        for seed in seeds:
-            for task in TASKS:
-                await run_task(task=task, base_url=ENV_BASE_URL, seed=seed)
+        for task in TASKS:
+            await run_task(task=task, base_url=ENV_BASE_URL)
     finally:
         if needs_local_server:
             stop_local_server()
