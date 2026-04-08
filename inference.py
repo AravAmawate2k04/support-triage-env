@@ -1,9 +1,14 @@
 """
-Inference script for the Support Triage Environment.
-====================================================
+Inference script — Simple Baseline for the Support Operations Environment v2.
+==============================================================================
 
-Runs all three tasks against the live OpenEnv server and emits structured
-logs in the mandatory [START] / [STEP] / [END] format.
+Strategy: One-shot classification.
+The agent immediately classifies, assigns, drafts a response, and closes —
+WITHOUT using any retrieval actions (view_customer, search_kb, etc.).
+
+This is the *simple* baseline. It scores well on easy tasks but poorly on
+medium/hard where evidence gathering and policy compliance are rewarded.
+See inference_tool_use.py for the smart baseline.
 
 Environment variables
 ---------------------
@@ -29,16 +34,9 @@ import textwrap
 import time
 from typing import Any, Dict, List, Optional
 
-try:
-    from dotenv import load_dotenv
-except ImportError:
-    def load_dotenv(*args: Any, **kwargs: Any) -> bool:
-        """Gracefully skip .env loading when python-dotenv is unavailable."""
-        return False
-
+from dotenv import load_dotenv
 from openai import OpenAI
 
-# Load variables from .env file (values already in the environment take precedence)
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 
 # ---------------------------------------------------------------------------
@@ -50,17 +48,12 @@ MODEL_NAME: str = os.getenv("MODEL_NAME") or "Qwen/Qwen2.5-72B-Instruct"
 ENV_BASE_URL: str = os.getenv("ENV_BASE_URL") or "http://127.0.0.1:8000"
 
 BENCHMARK = "support_triage"
-MAX_STEPS = 1          # Single-step episodes
+MAX_STEPS = 12
 TEMPERATURE = 0.2
-MAX_TOKENS = 600
+MAX_TOKENS = 800
 SUCCESS_SCORE_THRESHOLD = 0.5
 
-TASKS = ["categorize", "triage", "respond"]
-TASK_SEEDS = {
-    "categorize": 101,
-    "triage": 202,
-    "respond": 303,
-}
+TASKS = ["classify_and_route", "investigate_and_resolve", "complex_operations"]
 
 # ---------------------------------------------------------------------------
 # Logging helpers (mandatory format)
@@ -79,7 +72,6 @@ def log_step(
 ) -> None:
     error_val = error if error else "null"
     done_val = str(done).lower()
-    # Keep action on one line; truncate if very long
     action_safe = action.replace("\n", " ")[:200]
     print(
         f"[STEP] step={step} action={action_safe} "
@@ -103,98 +95,56 @@ def log_end(
 
 
 # ---------------------------------------------------------------------------
-# LLM prompts per task
+# One-shot system prompt
 # ---------------------------------------------------------------------------
 
-SYSTEM_PROMPTS = {
-    "categorize": textwrap.dedent("""
-        You are a customer-support triage system.
-        Given a support ticket, classify it into EXACTLY ONE category.
-        Valid categories: billing, technical, account, feedback, shipping
+SYSTEM_PROMPT = textwrap.dedent("""
+    You are a customer-support agent. Given a support ticket, you must:
 
-        Respond with a JSON object with a single field:
-        {"category": "<one of the valid categories>"}
+    1. Classify the ticket:
+       - category: billing | technical | account | feedback | shipping
+       - priority: low | medium | high | urgent
+       - assigned_team: billing | support | engineering | sales | logistics
 
-        Do not include any explanation or extra fields.
-    """).strip(),
+    2. Write a professional customer-facing reply (response_text) that:
+       - Starts with a greeting using the customer's first name
+       - Acknowledges the specific issue
+       - Provides clear, actionable resolution steps
+       - References relevant policy or workaround if you know one
+       - Ends with "Best regards, Support Team"
 
-    "triage": textwrap.dedent("""
-        You are a customer-support triage system.
-        Given a support ticket, output a JSON object with these EXACT fields:
-        - category: one of billing, technical, account, feedback, shipping
-        - priority: one of low, medium, high, urgent
-        - assigned_team: one of billing, support, engineering, sales, logistics
+    Respond ONLY with a JSON object. No extra text. No code fences.
 
-        Priority guidance:
-          urgent = production down / locked out / delivery overdue
-          high   = significant disruption, billing error, wrong item
-          medium = account changes, subscription cancellation
-          low    = questions, feature requests, compliments
-
-        Team routing:
-          billing    → payment / invoice / subscription issues
-          support    → password, account access, general questions, feedback
-          engineering → bugs, API errors, crashes
-          sales      → pricing, enterprise, upgrades
-          logistics  → delivery, shipping, wrong item
-
-        Respond ONLY with the JSON object. No extra text.
-    """).strip(),
-
-    "respond": textwrap.dedent("""
-        You are a friendly, professional customer-support agent.
-        Given a support ticket plus any relevant context/policies, do TWO things:
-
-        1. Triage the ticket (JSON fields: category, priority, assigned_team).
-        2. Write a complete customer-facing reply (JSON field: response_text).
-
-        The reply MUST:
-        - Start with a greeting that uses the customer's first name
-        - Acknowledge the specific issue
-        - Provide clear, actionable resolution steps
-        - Reference any relevant policy or FAQ if provided
-        - End with a professional closing (e.g. "Best regards, Support Team")
-
-        Respond with a JSON object containing:
-        {
-          "category": "...",
-          "priority": "...",
-          "assigned_team": "...",
-          "response_text": "..."
-        }
-
-        No extra text outside the JSON.
-    """).strip(),
-}
+    {
+      "category": "...",
+      "priority": "...",
+      "assigned_team": "...",
+      "response_text": "..."
+    }
+""").strip()
 
 
 def build_user_prompt(obs: Dict[str, Any]) -> str:
-    """Build the user-facing prompt from an observation dict."""
-    ticket_block = (
-        f"Ticket ID: {obs.get('ticket_id', '')}\n"
-        f"Customer: {obs.get('customer_name', '')} ({obs.get('customer_tier', '')} tier)\n"
-        f"Subject: {obs.get('subject', '')}\n\n"
-        f"{obs.get('body', '')}"
-    )
-    context = obs.get("context", {})
-    if context:
-        context_lines = "\n".join(f"  {k}: {v}" for k, v in context.items())
-        ticket_block += f"\n\n--- Context & Policies ---\n{context_lines}"
-    return ticket_block
+    parts = [
+        f"Ticket ID: {obs.get('ticket_id', '')}",
+        f"Customer: {obs.get('customer_name', '')} ({obs.get('customer_tier', '')} tier)",
+        f"Subject: {obs.get('subject', '')}",
+        "",
+        obs.get("body", ""),
+    ]
+    return "\n".join(parts)
 
 
 def get_action_from_model(
     client: OpenAI,
-    task: str,
     obs: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Call the LLM and parse the JSON action."""
     user_prompt = build_user_prompt(obs)
     try:
         completion = client.chat.completions.create(
             model=MODEL_NAME,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPTS[task]},
+                {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
             temperature=TEMPERATURE,
@@ -202,45 +152,123 @@ def get_action_from_model(
         )
         text = (completion.choices[0].message.content or "").strip()
 
-        # Try to extract JSON from the response
         if "```" in text:
-            # Strip code fences
             text = text.split("```")[1]
             if text.startswith("json"):
                 text = text[4:]
+            text = text.strip()
 
-        parsed = json.loads(text)
-        return parsed
+        return json.loads(text)
 
-    except Exception:
-        # Return safe fallback action
-        fallback: Dict[str, Any] = {"category": "technical"}
-        if task in ("triage", "respond"):
-            fallback["priority"] = "medium"
-            fallback["assigned_team"] = "support"
-        if task == "respond":
-            fallback["response_text"] = (
-                f"Dear {obs.get('customer_name', 'Customer').split()[0]},\n\n"
-                "Thank you for contacting us. We have received your request and will "
-                "follow up shortly.\n\nBest regards,\nSupport Team"
-            )
-        return fallback
+    except Exception as exc:
+        print(f"[DEBUG] Model request failed: {exc}", flush=True)
+        customer_name = obs.get("customer_name", "Customer")
+        first_name = customer_name.split()[0]
+        return {
+            "category": "technical",
+            "priority": "medium",
+            "assigned_team": "support",
+            "response_text": (
+                f"Dear {first_name},\n\n"
+                "Thank you for contacting us. We have received your request "
+                "and will follow up shortly.\n\nBest regards,\nSupport Team"
+            ),
+        }
 
 
 # ---------------------------------------------------------------------------
-# Server lifecycle helpers
+# Multi-step episode runner — simple one-shot strategy
+# ---------------------------------------------------------------------------
+
+async def run_task(task: str, base_url: str) -> None:
+    from openenv.core.generic_client import GenericEnvClient
+
+    rewards: List[float] = []
+    steps_taken = 0
+    score = 0.0
+    success = False
+    error_msg: Optional[str] = None
+
+    log_start(task=task, env=BENCHMARK, model=MODEL_NAME)
+
+    client_openai = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+
+    async with GenericEnvClient(base_url=base_url) as env:
+        try:
+            step_result = await env.reset(task=task)
+            obs: Dict[str, Any] = step_result.observation  # type: ignore[assignment]
+
+            # One LLM call, then execute 4 fixed steps
+            llm_action = get_action_from_model(client_openai, obs)
+
+            action_sequence = [
+                {
+                    "action_type": "classify_ticket",
+                    "category": llm_action.get("category", "technical"),
+                },
+                {
+                    "action_type": "assign",
+                    "priority": llm_action.get("priority", "medium"),
+                    "assigned_team": llm_action.get("assigned_team", "support"),
+                },
+                {
+                    "action_type": "draft_response",
+                    "response_text": llm_action.get("response_text", ""),
+                },
+                {"action_type": "close_ticket"},
+            ]
+
+            for step_num, action_dict in enumerate(action_sequence, start=1):
+                if steps_taken >= MAX_STEPS:
+                    break
+
+                step_result = await env.step(action_dict)
+                obs = step_result.observation  # type: ignore[assignment]
+                reward = float(step_result.reward or 0.0)
+                done = step_result.done
+
+                rewards.append(reward)
+                steps_taken = step_num
+
+                log_action = json.dumps(
+                    {k: v for k, v in action_dict.items() if k != "response_text"},
+                    ensure_ascii=False,
+                )
+                if "response_text" in action_dict:
+                    rt = str(action_dict.get("response_text", ""))[:60].replace("\n", " ")
+                    log_action = log_action[:-1] + f', "response_text": "{rt}..."}}'
+
+                log_step(
+                    step=step_num,
+                    action=log_action,
+                    reward=reward,
+                    done=done,
+                    error=error_msg,
+                )
+
+                if done:
+                    break
+
+        except Exception as exc:
+            error_msg = str(exc)[:120]
+            print(f"[DEBUG] Episode error: {exc}", flush=True)
+        finally:
+            score = rewards[-1] if rewards else 0.0
+            success = score >= SUCCESS_SCORE_THRESHOLD
+            log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
+
+
+# ---------------------------------------------------------------------------
+# Server lifecycle
 # ---------------------------------------------------------------------------
 
 _SERVER_PROC: Optional[subprocess.Popen] = None  # type: ignore[type-arg]
 
 
 def start_local_server() -> None:
-    """Start the uvicorn server as a background subprocess."""
     global _SERVER_PROC
-
     env_dir = os.path.dirname(os.path.abspath(__file__))
     python = sys.executable
-
     _SERVER_PROC = subprocess.Popen(
         [
             python, "-m", "uvicorn",
@@ -251,8 +279,6 @@ def start_local_server() -> None:
         ],
         cwd=env_dir,
     )
-
-    # Wait until the server responds to /health
     import urllib.request
     health_url = "http://127.0.0.1:8000/health"
     for _ in range(30):
@@ -277,81 +303,18 @@ def stop_local_server() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Main episode runner
+# Main
 # ---------------------------------------------------------------------------
 
-async def run_task(
-    task: str,
-    base_url: str,
-) -> None:
-    """Run a single-task episode and emit [START]/[STEP]/[END] logs."""
-    from openenv.core.generic_client import GenericEnvClient
-
-    rewards: List[float] = []
-    steps_taken = 0
-    score = 0.0
-    success = False
-    error_msg: Optional[str] = None
-
-    log_start(task=task, env=BENCHMARK, model=MODEL_NAME)
-
-    client_openai = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
-
-    async with GenericEnvClient(base_url=base_url) as env:
-        try:
-            # reset() kwargs are forwarded to environment's reset(task=...)
-            step_result = await env.reset(task=task, seed=TASK_SEEDS[task])
-            obs: Dict[str, Any] = step_result.observation  # type: ignore[assignment]
-
-            for step in range(1, MAX_STEPS + 1):
-                if step_result.done:
-                    break
-
-                # Get action from the model
-                action_dict = get_action_from_model(client_openai, task, obs)
-
-                # Execute step
-                step_result = await env.step(action_dict)
-                obs = step_result.observation  # type: ignore[assignment]
-
-                reward = float(step_result.reward or 0.0)
-                done = step_result.done
-
-                rewards.append(reward)
-                steps_taken = step
-
-                action_str = json.dumps(
-                    {k: v for k, v in action_dict.items() if k != "response_text"},
-                    ensure_ascii=False,
-                )
-                if "response_text" in action_dict:
-                    rt = str(action_dict["response_text"])[:60].replace("\n", " ")
-                    action_str = action_str[:-1] + f', "response_text": "{rt}..."}}'
-
-                log_step(step=step, action=action_str, reward=reward, done=done, error=error_msg)
-
-                if done:
-                    break
-
-        except Exception as exc:
-            error_msg = str(exc)[:120]
-            if steps_taken == 0:
-                steps_taken = 1
-                log_step(step=1, action="{}", reward=0.0, done=True, error=error_msg)
-        finally:
-            score = rewards[-1] if rewards else 0.0
-            success = score >= SUCCESS_SCORE_THRESHOLD
-            log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
-
-
 async def main() -> None:
-    # Decide whether to start a local server or connect to a running one
     needs_local_server = ENV_BASE_URL in (
         "http://127.0.0.1:8000", "http://localhost:8000"
     ) and not os.getenv("ENV_BASE_URL")
 
     if needs_local_server:
+        print("[DEBUG] Starting local environment server ...", flush=True)
         start_local_server()
+        print("[DEBUG] Server ready.", flush=True)
 
     try:
         for task in TASKS:
