@@ -295,7 +295,7 @@ All 3 official validator checks pass:
 
 Run it yourself:
 ```bash
-bash validate.py https://aravamawate-support-triage-env.hf.space .
+bash validate.sh https://aravamawate-support-triage-env.hf.space .
 ```
 
 ---

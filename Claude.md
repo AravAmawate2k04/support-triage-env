@@ -24,7 +24,7 @@ python test_env.py
 python test_env.py --url http://localhost:8000
 
 # Validate submission (requires Docker + openenv-core)
-bash validate.py https://aravamawate-support-triage-env.hf.space .
+bash validate.sh https://aravamawate-support-triage-env.hf.space .
 
 # OpenEnv validation
 openenv validate .
