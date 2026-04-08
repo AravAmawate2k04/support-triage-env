@@ -151,7 +151,7 @@ cd support-triage-env
 python -m venv venv
 source venv/bin/activate
 
-pip install openenv-core fastapi uvicorn pydantic openai
+pip install openenv-core fastapi uvicorn pydantic openai python-dotenv
 pip install -e .
 ```
 
@@ -256,8 +256,6 @@ The script:
 **Actual output from a real run:**
 
 ```
-[DEBUG] Starting local environment server ...
-[DEBUG] Server ready.
 [START] task=categorize env=support_triage model=Qwen/Qwen2.5-72B-Instruct
 [STEP] step=1 action={"category": "account"} reward=1.00 done=true error=null
 [END] success=true steps=1 score=1.000 rewards=1.00

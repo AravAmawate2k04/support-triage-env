@@ -472,6 +472,7 @@ class SupportTriageEnvironment(Environment):
         self._state = State(episode_id=str(uuid4()), step_count=0)
         self._task: str = "categorize"
         self._ticket: Optional[Dict[str, Any]] = None
+        self._episode_done: bool = False
         self._rng = random.Random()
 
     # ------------------------------------------------------------------
@@ -500,6 +501,7 @@ class SupportTriageEnvironment(Environment):
 
         self._task = task
         self._ticket = self._rng.choice(TICKETS)
+        self._episode_done = False
         self._state = State(episode_id=str(uuid4()), step_count=0)
 
         return self._make_observation(done=False, reward=None)
@@ -511,6 +513,9 @@ class SupportTriageEnvironment(Environment):
         Returns:
             SupportTriageObservation with reward, done=True, and score breakdown.
         """
+        if self._episode_done:
+            raise RuntimeError("Episode already completed. Call reset() before step().")
+
         self._state.step_count += 1
         # Auto-initialise if reset() was never called (e.g. stateless HTTP mode)
         if self._ticket is None:
@@ -520,6 +525,7 @@ class SupportTriageEnvironment(Environment):
         reward, breakdown = self._grade(action, ticket)
 
         # Episode ends after one step for all tasks
+        self._episode_done = True
         obs = self._make_observation(done=True, reward=reward)
         obs.feedback = self._format_feedback(breakdown, ticket)
         obs.score_breakdown = breakdown

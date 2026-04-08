@@ -29,7 +29,13 @@ import textwrap
 import time
 from typing import Any, Dict, List, Optional
 
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    def load_dotenv(*args: Any, **kwargs: Any) -> bool:
+        """Gracefully skip .env loading when python-dotenv is unavailable."""
+        return False
+
 from openai import OpenAI
 
 # Load variables from .env file (values already in the environment take precedence)
@@ -50,6 +56,11 @@ MAX_TOKENS = 600
 SUCCESS_SCORE_THRESHOLD = 0.5
 
 TASKS = ["categorize", "triage", "respond"]
+TASK_SEEDS = {
+    "categorize": 101,
+    "triage": 202,
+    "respond": 303,
+}
 
 # ---------------------------------------------------------------------------
 # Logging helpers (mandatory format)
@@ -201,8 +212,7 @@ def get_action_from_model(
         parsed = json.loads(text)
         return parsed
 
-    except Exception as exc:
-        print(f"[DEBUG] Model request failed: {exc}", flush=True)
+    except Exception:
         # Return safe fallback action
         fallback: Dict[str, Any] = {"category": "technical"}
         if task in ("triage", "respond"):
@@ -290,7 +300,7 @@ async def run_task(
     async with GenericEnvClient(base_url=base_url) as env:
         try:
             # reset() kwargs are forwarded to environment's reset(task=...)
-            step_result = await env.reset(task=task)
+            step_result = await env.reset(task=task, seed=TASK_SEEDS[task])
             obs: Dict[str, Any] = step_result.observation  # type: ignore[assignment]
 
             for step in range(1, MAX_STEPS + 1):
@@ -325,7 +335,9 @@ async def run_task(
 
         except Exception as exc:
             error_msg = str(exc)[:120]
-            print(f"[DEBUG] Episode error: {exc}", flush=True)
+            if steps_taken == 0:
+                steps_taken = 1
+                log_step(step=1, action="{}", reward=0.0, done=True, error=error_msg)
         finally:
             score = rewards[-1] if rewards else 0.0
             success = score >= SUCCESS_SCORE_THRESHOLD
@@ -339,9 +351,7 @@ async def main() -> None:
     ) and not os.getenv("ENV_BASE_URL")
 
     if needs_local_server:
-        print("[DEBUG] Starting local environment server ...", flush=True)
         start_local_server()
-        print("[DEBUG] Server ready.", flush=True)
 
     try:
         for task in TASKS:

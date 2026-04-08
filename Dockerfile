@@ -20,7 +20,8 @@ RUN pip install --no-cache-dir \
     "fastapi>=0.100.0" \
     "uvicorn>=0.20.0" \
     "pydantic>=2.0.0" \
-    "openai>=1.0.0"
+    "openai>=1.0.0" \
+    "python-dotenv>=1.0.0"
 
 # Install the environment package in editable mode so imports resolve
 RUN pip install --no-cache-dir -e .
