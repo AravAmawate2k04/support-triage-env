@@ -268,14 +268,17 @@ def _get_next_action(client: OpenAI, messages: List[Dict[str, str]]) -> Dict[str
             text = text.strip()
 
         parsed = json.loads(text)
-        # Ensure action_type is present
         if "action_type" not in parsed:
-            parsed["action_type"] = "close_ticket"
+            raise ValueError(
+                f"LLM response missing 'action_type' field. Raw text: {text[:200]}"
+            )
         return parsed
 
     except Exception as exc:
+        # Log raw output for debugging, then re-raise so the episode fails
+        # loudly rather than silently degrading to a close_ticket no-op.
         print(f"[DEBUG] LLM action parse failed: {exc}", flush=True)
-        return {"action_type": "close_ticket"}
+        raise
 
 
 # ---------------------------------------------------------------------------

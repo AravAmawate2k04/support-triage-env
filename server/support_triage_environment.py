@@ -74,6 +74,8 @@ class EpisodeState:
     # Track what was returned to avoid re-fetching (but still penalise redundant calls)
     customer_profile_fetched: bool = False
     order_history_fetched: bool = False
+    last_kb_results: Optional[List[Dict[str, Any]]] = None  # result of last search_kb call
+    last_policy_text: Optional[str] = None                  # result of last check_policy call
 
     applied_actions: List[str] = field(default_factory=list)
     actions_taken: List[str] = field(default_factory=list)
@@ -127,31 +129,43 @@ def _available_actions(es: EpisodeState) -> List[str]:
 
 def _search_kb(query: str, scenario: Scenario) -> List[Dict[str, Any]]:
     """
-    Simple relevance search over scenario KB articles.
+    Relevance search over scenario KB articles.
 
-    Returns all articles sorted by relevance, with relevance tag included.
-    Distractors are included to make the task harder.
+    Ranking: query term overlap is the primary signal (each hit worth 3 points).
+    A hidden relevance bonus (2/1/0 for high/medium/distractor) acts as a
+    tie-breaker so that equal-scoring articles surface in a sensible order.
+
+    The 'relevance' tag is NOT included in the returned results — the agent
+    must judge relevance from the content, not a metadata label.
+
+    An empty or off-topic query degrades to tie-breaker ordering, which puts
+    high-relevance articles first but gives no advantage to the query terms.
+    A precise query (e.g. "file upload crash 500") should score the correct
+    article well above distractors.
     """
     if not scenario.kb_articles:
-        return [{"title": "No results", "content": "No knowledge base articles found for this query.", "relevance": "none"}]
+        return [{"title": "No results", "content": "No knowledge base articles found for this query."}]
 
     query_lower = query.lower() if query else ""
+    terms = [t for t in query_lower.split() if len(t) > 2]
+
     results = []
     for article in scenario.kb_articles:
         content_lower = (article.get("title", "") + " " + article.get("content", "")).lower()
-        # Score by term overlap
-        terms = [t for t in query_lower.split() if len(t) > 2]
         hits = sum(1 for t in terms if t in content_lower) if terms else 0
-        results.append({**article, "_score": hits})
+        # Hidden tie-breaker: not exposed to agent
+        rel_bonus = {"high": 2, "medium": 1, "distractor": 0}.get(
+            article.get("relevance", "distractor"), 0
+        )
+        combined = hits * 3 + rel_bonus
+        results.append({
+            "title": article.get("title", ""),
+            "content": article.get("content", ""),
+            "_combined": combined,
+        })
 
-    # Sort: high relevance first, then by term score, then distractors
-    def sort_key(a: Dict[str, Any]) -> tuple:
-        rel_order = {"high": 0, "medium": 1, "distractor": 2, "none": 3}
-        return (rel_order.get(a.get("relevance", "none"), 3), -a.get("_score", 0))
-
-    results.sort(key=sort_key)
-    # Remove internal score field
-    return [{k: v for k, v in r.items() if k != "_score"} for r in results]
+    results.sort(key=lambda a: -a["_combined"])
+    return [{k: v for k, v in r.items() if k != "_combined"} for r in results]
 
 
 # ---------------------------------------------------------------------------
@@ -280,9 +294,10 @@ class SupportTriageEnvironment(Environment):
 
         elif action_type == "search_kb":
             ep.evidence_used.add("search_kb")
+            ep.last_kb_results = _search_kb(action.query or "", scenario)
             feedback_lines.append(
                 f"Knowledge base searched for: '{action.query or '(no query)'}'. "
-                f"Returned {len(scenario.kb_articles)} article(s)."
+                f"Returned {len(ep.last_kb_results)} article(s)."
             )
 
         elif action_type == "check_policy":
@@ -293,14 +308,21 @@ class SupportTriageEnvironment(Environment):
                 None,
             )
             if matched:
+                ep.last_policy_text = f"[{matched}]\n{scenario.applicable_policies[matched]}"
                 feedback_lines.append(f"Policy retrieved: '{matched}'.")
             elif scenario.applicable_policies:
-                # Return all available policies if name not found
+                # Tell the agent what names exist, but don't expose content
+                ep.last_policy_text = (
+                    f"Policy '{policy_name}' not found. "
+                    f"Available policies: {list(scenario.applicable_policies.keys())}. "
+                    f"Use check_policy with one of these names to retrieve the full text."
+                )
                 feedback_lines.append(
-                    f"Policy '{policy_name}' not found exactly. "
+                    f"Policy '{policy_name}' not found. "
                     f"Available: {list(scenario.applicable_policies.keys())}."
                 )
             else:
+                ep.last_policy_text = "No policies available for this scenario."
                 feedback_lines.append("No policies found for this scenario.")
 
         elif action_type == "classify_ticket":
@@ -384,6 +406,7 @@ class SupportTriageEnvironment(Environment):
                 applied_actions=ep.applied_actions,
                 escalated=ep.escalated,
                 steps_used=ep.steps_used,
+                max_steps=ep.max_steps,
                 cumulative_step_reward=ep.cumulative_step_reward,
                 ground_truth=scenario.ground_truth,
             )
@@ -414,6 +437,7 @@ class SupportTriageEnvironment(Environment):
                 applied_actions=ep.applied_actions,
                 escalated=ep.escalated,
                 steps_used=ep.steps_used,
+                max_steps=ep.max_steps,
                 cumulative_step_reward=ep.cumulative_step_reward,
                 ground_truth=scenario.ground_truth,
             )
@@ -485,17 +509,8 @@ class SupportTriageEnvironment(Environment):
         # Attach latest retrieval results to the observation
         last_action = ep.actions_taken[-1] if ep.actions_taken else ""
         if last_action == "search_kb":
-            # Return KB results for the last search
-            # (We store the last query result; for simplicity re-compute from scenario)
-            obs.kb_results = scenario.kb_articles if scenario.kb_articles else []
+            obs.kb_results = ep.last_kb_results
         elif last_action == "check_policy":
-            # Return all applicable policy texts
-            if scenario.applicable_policies:
-                obs.policy_text = "\n\n".join(
-                    f"[{name}]\n{text}"
-                    for name, text in scenario.applicable_policies.items()
-                )
-            else:
-                obs.policy_text = "No applicable policies found."
+            obs.policy_text = ep.last_policy_text
 
         return obs

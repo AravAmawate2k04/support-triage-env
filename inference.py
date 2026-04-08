@@ -161,19 +161,10 @@ def get_action_from_model(
         return json.loads(text)
 
     except Exception as exc:
+        # Log raw model output for debugging, then re-raise so the episode
+        # fails loudly rather than silently scoring a dummy action.
         print(f"[DEBUG] Model request failed: {exc}", flush=True)
-        customer_name = obs.get("customer_name", "Customer")
-        first_name = customer_name.split()[0]
-        return {
-            "category": "technical",
-            "priority": "medium",
-            "assigned_team": "support",
-            "response_text": (
-                f"Dear {first_name},\n\n"
-                "Thank you for contacting us. We have received your request "
-                "and will follow up shortly.\n\nBest regards,\nSupport Team"
-            ),
-        }
+        raise
 
 
 # ---------------------------------------------------------------------------

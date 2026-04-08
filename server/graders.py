@@ -355,6 +355,7 @@ def compute_final_score(
     applied_actions: List[str],
     escalated: bool,
     steps_used: int,
+    max_steps: int,
     cumulative_step_reward: float,
     ground_truth: GroundTruth,
 ) -> tuple[float, Dict[str, float]]:
@@ -398,7 +399,7 @@ def compute_final_score(
     bd["response_uses_name"]        = resp_scores["response_uses_name"]
 
     # Efficiency
-    bd["step_efficiency"] = _step_efficiency_score(steps_used, ground_truth.sla_deadline_steps or 99)
+    bd["step_efficiency"] = _step_efficiency_score(steps_used, max_steps)
     bd["sla_compliance"]  = _sla_compliance_score(
         steps_used, ground_truth.sla_deadline_steps, escalated, ground_truth
     )
